@@ -88,21 +88,22 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('chunk-size').value = items.chunkSize;
   });
 
-  // Save settings
+// Save settings
   document.getElementById('save-settings').addEventListener('click', function() {
     const apiUrl = document.getElementById('api-url').value.trim();
     const apiKey = document.getElementById('api-key').value.trim();
     const voice = document.getElementById('voice').value.trim();
     const chunkSize = document.getElementById('chunk-size').value;
 
-    const encrypt = (text) => btoa(text);
+    // ========== REMOVE THE OLD ENCRYPT LINE ==========
+    // DELETE THIS LINE: const encrypt = (text) => btoa(text);
+    // DELETE THIS LINE: const apiKeyEncrypted = encrypt(apiKey);
 
-    const apiKeyEncrypted = encrypt(apiKey);
-
-    // Save settings with encrypted API key
+    // ========== NEW CODE - NO CLIENT-SIDE ENCRYPTION ==========
+    // Just save the API key as-is, let background.js handle encryption
     chrome.storage.local.set({
       apiUrl: apiUrl,
-      apiKey: apiKeyEncrypted,
+      apiKey: apiKey, // Save directly - background.js will encrypt it
       voice: voice,
       chunkSize: chunkSize,
       maxCacheSize: '10' // Set a default max cache size
@@ -113,14 +114,13 @@ document.addEventListener('DOMContentLoaded', function() {
         successElement.style.display = 'none';
       }, 2000);
 
-      // Clear the API key input field to avoid showing the encrypted version
+      // Clear the API key input field for security
       document.getElementById('api-key').value = '';
 
       // Test connection with new settings
       testServerConnection();
     });
   });
-  
   // Test connection button
   document.getElementById('test-connection').addEventListener('click', function() {
     testServerConnection();

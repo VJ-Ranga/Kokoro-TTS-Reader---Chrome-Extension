@@ -326,6 +326,13 @@ function startPlayback() {
   updateBackgroundStatus();
 }
 
+// ========== REMOVE THESE OLD FUNCTIONS COMPLETELY ==========
+// DELETE the entire isBase64Encoded function (around line 400+)
+// DELETE the duplicate decrypt function at the bottom (around line 430+)
+// DELETE any console.logs that might show API keys
+
+// ========== UPDATE THESE SECTIONS ==========
+
 // Process a chunk of text
 async function processChunk(index) {
   if (index >= playerState.chunks.length || !playerState.isPlaying) {
@@ -364,20 +371,16 @@ async function processChunk(index) {
   console.log(`Requesting audio for chunk ${index + 1}/${playerState.totalChunks}`);
   
   try {
-    const decrypt = (text) => {
-      if (!isBase64Encoded(text)) {
-        throw new Error("The string to be decoded is not correctly encoded.");
-      }
-      return atob(text);
-    };
-
-    const apiKey = decrypt(playerState.settings.apiKey);
+    // ========== SIMPLIFIED API KEY HANDLING ==========
+    // The API key comes from background.js already decrypted, so use it directly
+    const apiKey = playerState.settings.apiKey || 'not-needed';
+    
     // Make API request
     const response = await fetch(`${playerState.settings.apiUrl}/audio/speech`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
+        'Authorization': `Bearer ${apiKey}` // Use the key directly
       },
       body: JSON.stringify(requestBody)
     });
@@ -424,141 +427,7 @@ async function processChunk(index) {
   }
 }
 
-// Add audio buffer to cache with LRU mechanism
-function cacheAudioBuffer(index, buffer) {
-  // Update cache order first (add to front or move to front)
-  updateCacheOrder(index);
-  
-  // Add to cache
-  playerState.audioCache[index] = buffer;
-  
-  // Check if we need to evict older items
-  const maxSize = playerState.settings.maxCacheSize || 10;
-  
-  if (playerState.audioCacheOrder.length > maxSize) {
-    // Remove oldest items
-    while (playerState.audioCacheOrder.length > maxSize) {
-      const oldestIndex = playerState.audioCacheOrder.pop();
-      console.log(`Cache full, removing chunk ${oldestIndex + 1} from cache`);
-      delete playerState.audioCache[oldestIndex];
-    }
-  }
-}
-
-// Update cache order (LRU tracking)
-function updateCacheOrder(index) {
-  // Remove the index if it already exists in the order
-  const existingPos = playerState.audioCacheOrder.indexOf(index);
-  if (existingPos !== -1) {
-    playerState.audioCacheOrder.splice(existingPos, 1);
-  }
-  
-  // Add to the front (most recently used)
-  playerState.audioCacheOrder.unshift(index);
-}
-
-// Play audio from the buffer using Web Audio API
-async function playAudioBuffer(buffer, index) {
-  try {
-    // Make sure we have an audio context
-    initAudioContext();
-    
-    // Make a copy of the buffer to avoid "detached ArrayBuffer" issues
-    const bufferToUse = buffer.slice(0);
-    
-    // Decode the audio data
-    const audioBuffer = await decodeAudioData(bufferToUse);
-    
-    // Check if still playing the same chunk
-    if (!playerState.isPlaying || playerState.currentChunk !== index) {
-      console.log('Playback state changed while decoding, skipping play');
-      return;
-    }
-    
-    // Create a new source node
-    const source = playerState.audioContext.createBufferSource();
-    source.buffer = audioBuffer;
-    
-    // Connect the source to the destination (speakers)
-    source.connect(playerState.audioContext.destination);
-    
-    // Store the source for stop
-    playerState.audioSource = source;
-    
-    // Set up ended event handler
-    source.onended = () => {
-      console.log(`Finished playing chunk ${index + 1}`);
-      
-      // Move to next chunk
-      if (index < playerState.totalChunks - 1 && playerState.isPlaying) {
-        // Send processing update if there are more chunks
-        sendProcessingUpdate(`Preparing next audio chunk (${index + 2} of ${playerState.totalChunks})...`);
-        
-        // Preload next chunk if not already loaded
-        if (index + 2 < playerState.totalChunks && !playerState.audioCache[index + 2]) {
-          preloadNextChunk(index + 2);
-        }
-        
-        // Process next chunk
-        processChunk(index + 1);
-      } else if (index >= playerState.totalChunks - 1) {
-        // Last chunk finished
-        console.log('Playback complete');
-        playerState.isPlaying = false;
-        playerState.audioSource = null;
-        stopKeepAlive();
-        updateBackgroundStatus();
-      }
-    };
-    
-    // Start the source
-    source.start(0);
-    console.log(`Started playing chunk ${index + 1}`);
-    
-    // Preload next chunk
-    if (index + 1 < playerState.totalChunks && !playerState.audioCache[index + 1]) {
-      preloadNextChunk(index + 1);
-    }
-    
-    updateBackgroundStatus();
-  } catch (error) {
-    console.error(`Error playing audio for chunk ${index + 1}:`, error);
-    showError(`Error playing audio: ${error.message}`);
-    
-    // Try next chunk
-    if (index < playerState.totalChunks - 1) {
-      processChunk(index + 1);
-    } else {
-      playerState.isPlaying = false;
-      stopKeepAlive();
-      updateBackgroundStatus();
-    }
-  }
-}
-
-// Promisified version of decodeAudioData
-function decodeAudioData(buffer) {
-  return new Promise((resolve, reject) => {
-    playerState.audioContext.decodeAudioData(buffer, 
-      (audioBuffer) => resolve(audioBuffer), 
-      (error) => reject(error || new Error('Failed to decode audio data'))
-    );
-  });
-}
-
-// Play audio from cache
-function playAudioFromCache(index) {
-  const buffer = playerState.audioCache[index];
-  if (buffer) {
-    // Make a copy of the buffer to avoid detached buffer issues
-    const bufferCopy = buffer.slice(0);
-    playAudioBuffer(bufferCopy, index);
-  } else {
-    // If somehow the cache entry is invalid, fetch it again
-    processChunk(index);
-  }
-}
-
+// ========== UPDATE PRELOAD FUNCTION TOO ==========
 // Preload the next chunk
 async function preloadNextChunk(index) {
   // Skip if already preloading, out of range, or already cached
@@ -585,20 +454,16 @@ async function preloadNextChunk(index) {
   };
   
   try {
-    const decrypt = (text) => {
-      if (!isBase64Encoded(text)) {
-        throw new Error("The string to be decoded is not correctly encoded.");
-      }
-      return atob(text);
-    };
+    // ========== SIMPLIFIED API KEY HANDLING ==========
+    // The API key comes from background.js already decrypted, so use it directly
+    const apiKey = playerState.settings.apiKey || 'not-needed';
 
-    const apiKey = decrypt(playerState.settings.apiKey);
     // Make API request
     const response = await fetch(`${playerState.settings.apiUrl}/audio/speech`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
+        'Authorization': `Bearer ${apiKey}` // Use the key directly
       },
       body: JSON.stringify(requestBody)
     });
