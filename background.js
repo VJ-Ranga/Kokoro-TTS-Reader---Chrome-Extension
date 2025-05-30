@@ -841,24 +841,121 @@ async function checkServerConnection() {
   }
 }
 
-// Encrypt a string using Base64
-function encrypt(text) {
-  return btoa(text);
+// Encrypt a string using AES-GCM
+async function encryptText(text) {
+  // Ensure text is a string; if null/undefined, encrypt an empty string.
+  // Callers should decide if an empty string means 'not-needed'.
+  const plainText = (text === null || typeof text === 'undefined') ? "" : text;
+  
+  const key = await getKey();
+  const iv = crypto.getRandomValues(new Uint8Array(12)); // Standard IV size for AES-GCM
+  const encodedText = new TextEncoder().encode(plainText);
+  
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: iv },
+    key,
+    encodedText
+  );
+  
+  // Prepend IV to ciphertext for storage: IV (12 bytes) + Ciphertext
+  const resultBuffer = new Uint8Array(iv.length + ciphertext.byteLength);
+  resultBuffer.set(iv);
+  resultBuffer.set(new Uint8Array(ciphertext), iv.length);
+  
+  // Convert combined buffer to Base64 string for easier storage in chrome.storage
+  return btoa(String.fromCharCode.apply(null, resultBuffer));
 }
 
-// Decrypt a Base64 encoded string
-function decrypt(text) {
-  if (!isBase64Encoded(text)) {
-    throw new Error("The string to be decoded is not correctly encoded.");
+// Decrypt a string using AES-GCM
+async function decryptText(encryptedBase64) {
+  if (!encryptedBase64) {
+     // If there's no encrypted text, return empty string.
+     // Callers (like checkServerConnection) will typically default this to 'not-needed'.
+     return ""; 
   }
-  return atob(text);
-}
-
-// Check if a string is Base64 encoded
-function isBase64Encoded(text) {
   try {
-    return btoa(atob(text)) === text;
-  } catch (e) {
-    return false;
+    const key = await getKey();
+    // Convert Base64 string back to Uint8Array
+    const encryptedData = Uint8Array.from(atob(encryptedBase64), c => c.charCodeAt(0));
+    
+    if (encryptedData.length < 12) { // IV is 12 bytes
+        console.warn("Encrypted data too short for AES-GCM, attempting direct Base64 decode as fallback.");
+        try {
+          // This might be an old, simply Base64 encoded key
+          return atob(encryptedBase64); 
+        } catch (e_atob) {
+          console.error("Direct Base64 decode fallback also failed.", e_atob);
+          throw new Error("Invalid encrypted data: too short and not valid Base64.");
+        }
+    }
+
+    const iv = encryptedData.slice(0, 12);
+    const ciphertext = encryptedData.slice(12);
+    
+    const decryptedBuffer = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: iv },
+      key,
+      ciphertext
+    );
+    
+    return new TextDecoder().decode(decryptedBuffer);
+  } catch (error) {
+    console.error("AES-GCM decryption failed:", error.message);
+    // Fallback for potentially old (non-AES-GCM) Base64 encoded keys
+    try {
+      const fallbackPlaintext = atob(encryptedBase64);
+      console.log("AES-GCM decryption failed, but successfully fell back to simple Base64 decode.");
+      return fallbackPlaintext;
+    } catch (e_fallback) {
+      console.error("Fallback Base64 decryption also failed:", e_fallback.message);
+      // If all decryption attempts fail, throw an error to be handled by the caller.
+      // Callers usually default to 'not-needed' in their catch blocks.
+      throw new Error('Failed to decrypt API key using AES-GCM and Base64 fallback.');
+    }
   }
+}
+
+const cryptoKeyName = 'kokoro_tts_encryption_key_v2'; // v2 to ensure a new key is used with AES-GCM
+
+async function getStoredKey() {
+  try {
+    const { [cryptoKeyName]: jwk } = await chrome.storage.local.get(cryptoKeyName);
+    if (jwk) {
+      return await crypto.subtle.importKey(
+        "jwk",
+        jwk,
+        { name: "AES-GCM" },
+        true,
+        ["encrypt", "decrypt"]
+      );
+    }
+  } catch (error) {
+    console.error("Error importing stored key:", error);
+  }
+  return null;
+}
+
+async function generateAndStoreKey() {
+  try {
+    const key = await crypto.subtle.generateKey(
+      { name: "AES-GCM", length: 256 },
+      true,
+      ["encrypt", "decrypt"]
+    );
+    const jwk = await crypto.subtle.exportKey("jwk", key);
+    await chrome.storage.local.set({ [cryptoKeyName]: jwk });
+    console.log("New AES-GCM encryption key generated and stored.");
+    return key;
+  } catch (error) {
+    console.error("Error generating and storing AES-GCM key:", error);
+    throw error; // Re-throw to indicate failure to the caller
+  }
+}
+
+async function getKey() {
+  let key = await getStoredKey();
+  if (!key) {
+    key = await generateAndStoreKey();
+  }
+  return key;
 }
