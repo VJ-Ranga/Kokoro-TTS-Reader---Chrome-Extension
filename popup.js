@@ -91,34 +91,46 @@ document.addEventListener('DOMContentLoaded', function() {
 // Save settings
   document.getElementById('save-settings').addEventListener('click', function() {
     const apiUrl = document.getElementById('api-url').value.trim();
-    const apiKey = document.getElementById('api-key').value.trim();
+    const apiKey = document.getElementById('api-key').value.trim(); // Plaintext API key from input
     const voice = document.getElementById('voice').value.trim();
     const chunkSize = document.getElementById('chunk-size').value;
 
-    // ========== REMOVE THE OLD ENCRYPT LINE ==========
-    // DELETE THIS LINE: const encrypt = (text) => btoa(text);
-    // DELETE THIS LINE: const apiKeyEncrypted = encrypt(apiKey);
+    // Send to background for proper validation and encryption
+    chrome.runtime.sendMessage({ 
+      action: 'saveSettings', 
+      settings: {
+        apiUrl: apiUrl,
+        apiKey: apiKey, // Send plaintext key
+        voice: voice,
+        chunkSize: chunkSize,
+        maxCacheSize: '10' // Default maxCacheSize, consider making this configurable
+      }
+    }, function(response) {
+      if (chrome.runtime.lastError) {
+        console.error("Error sending saveSettings message:", chrome.runtime.lastError.message);
+        showError("Error saving settings: " + chrome.runtime.lastError.message);
+        return;
+      }
 
-    // ========== NEW CODE - NO CLIENT-SIDE ENCRYPTION ==========
-    // Just save the API key as-is, let background.js handle encryption
-    chrome.storage.local.set({
-      apiUrl: apiUrl,
-      apiKey: apiKey, // Save directly - background.js will encrypt it
-      voice: voice,
-      chunkSize: chunkSize,
-      maxCacheSize: '10' // Set a default max cache size
-    }, function() {
-      const successElement = document.getElementById('save-success');
-      successElement.style.display = 'block';
-      setTimeout(() => {
-        successElement.style.display = 'none';
-      }, 2000);
-
-      // Clear the API key input field for security
-      document.getElementById('api-key').value = '';
-
-      // Test connection with new settings
-      testServerConnection();
+      if (response && response.success) {
+        const successElement = document.getElementById('save-success');
+        successElement.textContent = 'Settings saved successfully!'; // More informative message
+        successElement.style.display = 'block';
+        setTimeout(() => {
+          successElement.style.display = 'none';
+        }, 3000); // Increased display time
+        
+        // Clear the API key input field for security, as it was plaintext
+        document.getElementById('api-key').value = '';
+        
+        // Test connection with new settings to update status display
+        testServerConnection();
+      } else {
+        // Show specific error from background if available, otherwise generic
+        const errorMessage = response && response.error ? response.error : 'Failed to save settings. Please check your input.';
+        showError(errorMessage);
+        console.error("Failed to save settings:", response ? response.error : 'No response error given');
+      }
     });
   });
   // Test connection button

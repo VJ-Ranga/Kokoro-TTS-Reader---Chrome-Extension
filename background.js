@@ -70,150 +70,108 @@ function sendMessageAsync(message, timeout = 3000) {
 // Message handler
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   try {
-    // Handle messages targeted specifically to the background script
     if (message.target === 'background') {
+      // Handle messages specifically for the background script
       switch (message.action) {
-        case 'statusUpdate':
-          // Update our state based on the offscreen document's status
-          ttsState.isPlaying = message.isPlaying;
+        case 'offscreenReady':
+          ttsState.offscreenDocumentReady = true;
+          console.log('Offscreen document reported ready.');
+          // Potentially resolve a promise if something is waiting for this
+          sendResponse({ success: true });
+          break;
+        case 'playbackStarted':
+          ttsState.isPlaying = true;
+          ttsState.isProcessing = false;
           ttsState.currentChunk = message.currentChunk;
           ttsState.totalChunks = message.totalChunks;
-          
-          // If playback started, we're no longer processing
-          if (message.isPlaying) {
-            ttsState.isProcessing = false;
-            ttsState.processingMessage = '';
-          }
-          
-          // If playback stopped completely, consider closing the document
-          if (!message.isPlaying && ttsState.closeDocumentOnStop) {
-            console.log('Playback stopped, closing document');
+          broadcastStatus();
+          sendResponse({ success: true });
+          break;
+        case 'playbackEnded':
+          ttsState.isPlaying = false;
+          ttsState.isProcessing = false;
+          if (ttsState.closeDocumentOnStop) {
             safeCloseDocument();
           }
-          
-          // Broadcast the status update to the popup
           broadcastStatus();
-          sendResponse({success: true});
+          sendResponse({ success: true });
           break;
-          
-        case 'error':
-          // More user-friendly error message
-          const userMessage = getUserFriendlyErrorMessage(message.message);
-          ttsState.lastError = userMessage;
-          
-          console.error("Original error:", message.message);
-          
-          ttsState.isProcessing = false;
-          ttsState.processingMessage = '';
-          broadcastStatus();
-          sendResponse({success: true});
-          break;
-          
-        case 'processingUpdate':
-          // Processing update from offscreen document
-          ttsState.isProcessing = true;
-          ttsState.processingMessage = message.message || 'Processing...';
-          broadcastStatus();
-          sendResponse({success: true});
-          break;
-          
-        case 'keepAlive':
-          // Keep alive ping from offscreen document
-          console.log('Received keep alive from offscreen document');
-          ttsState.isPlaying = message.isPlaying;
+        case 'chunkUpdate':
           ttsState.currentChunk = message.currentChunk;
           ttsState.totalChunks = message.totalChunks;
-          sendResponse({success: true});
+          broadcastStatus();
+          sendResponse({ success: true });
           break;
-          
-        case 'offscreenReady':
-          // The offscreen document has loaded and is ready
-          console.log('Offscreen document is ready');
-          ttsState.offscreenDocumentReady = true;
-          ttsState.documentCreationInProgress = false;
-          
-          // If we have text waiting to be processed, send it to the offscreen document
-          if (ttsState.lastSelectedText) {
-            sendTextToOffscreen(ttsState.lastSelectedText);
+        case 'playbackError':
+          ttsState.isPlaying = false;
+          ttsState.isProcessing = false;
+          ttsState.lastError = getUserFriendlyErrorMessage(message.error);
+          broadcastStatus();
+          if (ttsState.closeDocumentOnStop) {
+            safeCloseDocument();
           }
-          sendResponse({success: true});
+          sendResponse({ success: false, error: ttsState.lastError });
           break;
-          
+        case 'processingUpdate': 
+          ttsState.isProcessing = message.isProcessing;
+          ttsState.processingMessage = message.message;
+          broadcastStatus();
+          sendResponse({ success: true });
+          break;
         default:
-          // Always send a response, even for unhandled messages
-          sendResponse({success: false, error: "Unhandled action"});
-          break;
+          break; 
       }
-      return true;
+      return true; 
     }
     
     // Handle general messages
     switch (message.action) {
       case 'readText':
         ttsState.lastSelectedText = message.text;
-        
-        // Set processing state immediately for UI responsiveness
-        ttsState.isProcessing = true;
-        ttsState.processingMessage = 'Initializing TTS engine...';
-        broadcastStatus();
-        
         startTtsPlayback(message.text);
-        sendResponse({success: true});
+        sendResponse({ success: true });
         break;
-        
-      case 'updateSelectedText':
-        ttsState.lastSelectedText = message.text;
-        sendResponse({success: true});
-        break;
-        
-      case 'getLastSelectedText':
-        sendResponse({text: ttsState.lastSelectedText});
-        break;
-        
-      case 'checkServer':
-        checkServerConnection().then(result => {
-          try {
-            sendResponse(result);
-          } catch (e) {
-            console.log("Error sending server connection response:", e);
-          }
-        });
-        return true; // Keep the messaging channel open for the async response
-        
+      case 'stopPlayback':
+        handleStopPlayback().then(() => sendResponse({ success: true }));
+        return true; // Keep channel open for async response
       case 'getStatus':
         sendResponse({
-          lastSelectedText: ttsState.lastSelectedText,
-          lastError: ttsState.lastError,
-          serverConnected: ttsState.serverConnected,
           isPlaying: ttsState.isPlaying,
           currentChunk: ttsState.currentChunk,
           totalChunks: ttsState.totalChunks,
+          lastError: ttsState.lastError,
+          lastSelectedText: ttsState.lastSelectedText,
           isProcessing: ttsState.isProcessing,
           processingMessage: ttsState.processingMessage
         });
         break;
-        
-      case 'stopPlayback':
-        // Stop playback with async handling
-        handleStopPlayback().then(() => {
-          sendResponse({success: true});
-        }).catch(e => {
-          console.error("Error in stop playback:", e);
-          sendResponse({success: false, error: getUserFriendlyErrorMessage(e.message)});
+      case 'getLastSelectedText':
+        sendResponse({ text: ttsState.lastSelectedText });
+        break;
+      case 'checkServer':
+        checkServerConnection().then(status => {
+          sendResponse(status);
+        }).catch(error => {
+          console.error("Error in checkServer message handler:", error);
+          sendResponse({ connected: false, message: "Unexpected error checking server." });
         });
-        return true; // Keep channel open for async response
-                
+        return true; // Indicates asynchronous response
+      case 'saveSettings': // New case for saving settings
+        handleSettingsSave(message.settings)
+          .then(response => sendResponse(response))
+          .catch(error => {
+            console.error("Error saving settings via message handler:", error);
+            sendResponse({ success: false, error: getUserFriendlyErrorMessage(error.message || "Failed to save settings.") });
+          });
+        return true; // Indicates asynchronous response
       default:
-        // Always send a response, even for unhandled messages
-        sendResponse({success: false, error: "Unhandled action"});
         break;
     }
   } catch (e) {
-    console.error("Error processing message:", e);
-    // Always send a response, even in case of errors
-    sendResponse({success: false, error: getUserFriendlyErrorMessage(e.message)});
+    console.error("Error processing message in background.js:", e);
+    sendResponse({success: false, error: getUserFriendlyErrorMessage(e.message || "Unknown error in background script.")});
   }
-  return true; // Keep the messaging channel open
+  return true; // Keep the messaging channel open for asynchronous responses
 });
 
 // Convert technical errors to user-friendly messages
@@ -325,86 +283,85 @@ async function startTtsPlayback(text) {
 }
 
 // Send text to the offscreen document
-function sendTextToOffscreen(text) {
-  // Get settings to send to the offscreen document
-  chrome.storage.local.get({
-    apiUrl: 'http://localhost:8880',
-    apiKey: encrypt('not-needed'),
-    voice: 'af_bella',
-    chunkSize: '1000',
-    maxCacheSize: '10'
-  }, function(settings) {
-    const decryptedApiKey = decrypt(settings.apiKey);
+async function sendTextToOffscreen(text) {
+  try {
+    const settings = await new Promise(resolve => {
+      chrome.storage.local.get({
+        apiUrl: 'http://localhost:8880',
+        apiKey: '', // Default to empty string, decrypt will handle it
+        voice: 'af_bella',
+        chunkSize: '1000',
+        maxCacheSize: '10'
+      }, resolve);
+    });
+
+    let decryptedApiKey;
+    let currentApiKeyToUse = settings.apiKey; // This is the potentially encrypted key from storage
+
+    try {
+      decryptedApiKey = await decrypt(currentApiKeyToUse);
+    } catch (decryptionError) {
+      if (decryptionError instanceof MigrationNeededError) {
+        console.log("API key migration needed in sendTextToOffscreen.");
+        decryptedApiKey = decryptionError.migratedPlaintext; // Use the plaintext from migration
+        try {
+          const newEncryptedApiKey = await encrypt(decryptedApiKey);
+          await chrome.storage.local.set({ apiKey: newEncryptedApiKey });
+          console.log("API key migrated and re-encrypted in storage (from sendTextToOffscreen).");
+        } catch (encryptError) {
+          console.error("Failed to re-encrypt migrated API key in sendTextToOffscreen:", encryptError);
+          // Continue with the decrypted (migrated) key for this operation
+        }
+      } else {
+        console.error('Error decrypting API key for offscreen document:', decryptionError);
+        ttsState.lastError = 'Failed to decrypt API key. Using default key for playback.';
+        decryptedApiKey = 'not-needed'; // Fallback to default
+      }
+    }
+    
+    // Ensure offscreen document is ready before sending
+    await ensureOffscreenDocumentExists(); // This also handles creation if not exists
+    if (!ttsState.offscreenDocumentReady) {
+        console.error("Offscreen document not ready after ensureOffscreenDocumentExists, cannot send text.");
+        ttsState.lastError = "Audio player component is not ready. Please try again.";
+        ttsState.isProcessing = false;
+        broadcastStatus();
+        return;
+    }
+
     sendMessageSafely({
       target: 'offscreen',
       action: 'processText',
       text: text,
       settings: {
         apiUrl: settings.apiUrl,
-        apiKey: decryptedApiKey,
+        apiKey: decryptedApiKey, // Use the (potentially migrated and now plaintext) API key
         voice: settings.voice,
         chunkSize: parseInt(settings.chunkSize),
         maxCacheSize: parseInt(settings.maxCacheSize || 10)
       }
     }, (response) => {
-      if (!response) {
-        console.error('Error sending message to offscreen document or no response received');
-        // Try recreating the offscreen document
-        recreateOffscreenDocument().then(() => {
-          // Try sending again after a short delay
-          setTimeout(() => sendTextToOffscreen(text), 500);
-        });
+      if (chrome.runtime.lastError) {
+        console.error('Error sending message to offscreen document:', chrome.runtime.lastError.message);
+        ttsState.lastError = "Failed to communicate with audio player. Please try again.";
+        ttsState.isProcessing = false;
+        broadcastStatus();
+        recreateOffscreenDocument();
+        return;
+      }
+      if (!response || !response.success) {
+        console.error('Offscreen document failed to process text:', response ? response.error : "No response");
+        ttsState.lastError = response && response.error ? getUserFriendlyErrorMessage(response.error) : "Audio player failed to process text.";
+        ttsState.isProcessing = false;
+        broadcastStatus();
       }
     });
-  });
-}
-
-// Start background-side keep alive monitoring
-function startKeepAliveMonitoring() {
-  // Clear any existing interval
-  if (ttsState.keepAliveInterval) {
-    clearInterval(ttsState.keepAliveInterval);
+  } catch (error) {
+    console.error("Critical error in sendTextToOffscreen:", error);
+    ttsState.lastError = getUserFriendlyErrorMessage(error.message || "Unknown error preparing text for playback.");
+    ttsState.isProcessing = false;
+    broadcastStatus();
   }
-  
-  // Set up an interval to check if the offscreen document is still responsive
-  ttsState.keepAliveInterval = setInterval(async () => {
-    if (ttsState.isPlaying) {
-      // Check if the offscreen document is still alive
-      try {
-        const response = await sendHeartbeat();
-        if (!response || !response.alive) {
-          console.log('Offscreen document not responding, recreating...');
-          await recreateOffscreenDocument();
-        }
-      } catch (error) {
-        console.error('Error checking offscreen document status:', error);
-        await recreateOffscreenDocument();
-      }
-    } else {
-      // If not playing, we can stop the monitoring
-      clearInterval(ttsState.keepAliveInterval);
-      ttsState.keepAliveInterval = null;
-    }
-  }, 15000); // Check every 15 seconds
-}
-
-// Send a heartbeat to the offscreen document with timeout
-function sendHeartbeat(timeout = 5000) {
-  return new Promise((resolve) => {
-    // Set up a timeout
-    const timer = setTimeout(() => {
-      console.log("Heartbeat timeout");
-      resolve(null);
-    }, timeout);
-    
-    sendMessageSafely({
-      target: 'offscreen',
-      action: 'heartbeat'
-    }, (response) => {
-      clearTimeout(timer);
-      resolve(response);
-    });
-  });
 }
 
 // Check if offscreen document exists, create if it doesn't
@@ -784,178 +741,351 @@ async function checkServerConnection() {
     const settings = await new Promise(resolve => {
       chrome.storage.local.get({
         apiUrl: 'http://localhost:8880',
-        apiKey: encrypt('not-needed')
+        apiKey: '' // Default to empty string, decrypt will handle it
       }, resolve);
     });
 
-    // Debug log for settings (consider removing for production)
-    // console.log('Settings retrieved:', settings);
-
-    // Decrypt the API key before use
     let decryptedApiKey;
+    let currentApiKeyToUse = settings.apiKey; // This is the potentially encrypted key from storage
+
     try {
-      decryptedApiKey = decrypt(settings.apiKey);
+      decryptedApiKey = await decrypt(currentApiKeyToUse);
     } catch (decryptionError) {
-      console.error('Error decrypting API key:', decryptionError);
-      ttsState.lastError = 'Failed to decrypt API key. Using default key.';
-      decryptedApiKey = 'not-needed'; // Use default key
+      if (decryptionError instanceof MigrationNeededError) {
+        console.log("API key migration needed in checkServerConnection.");
+        decryptedApiKey = decryptionError.migratedPlaintext; // Use the plaintext from migration
+        try {
+          const newEncryptedApiKey = await encrypt(decryptedApiKey);
+          await chrome.storage.local.set({ apiKey: newEncryptedApiKey });
+          console.log("API key migrated and re-encrypted in storage (from checkServerConnection).");
+        } catch (encryptError) {
+          console.error("Failed to re-encrypt migrated API key in checkServerConnection:", encryptError);
+          // Continue with the decrypted (migrated) key for this check
+        }
+      } else {
+        console.error('Error decrypting API key for server check:', decryptionError);
+        ttsState.lastError = 'Failed to decrypt API key. Using default key for connection test.';
+        decryptedApiKey = 'not-needed'; // Fallback to default for this check
+      }
     }
 
-    // Remove or conditionalize this log for production
-    // console.log('Decrypted API Key:', decryptedApiKey);
+    ttsState.lastError = ''; // Reset error before new check
 
-    // Reset the error state
-    ttsState.lastError = '';
-
-    // Check if server is available by making a simple request to the voices endpoint
-    try {
-      const response = await fetch(`${settings.apiUrl}/audio/voices`, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${decryptedApiKey}`
-        }
-      });
-
-      // Debug log for response status
-      console.log('Server response status:', response.status);
-
-      if (response.ok) {
-        ttsState.serverConnected = true;
-        return { connected: true, message: "Successfully connected to Kokoro TTS server" };
-      } else {
-        ttsState.serverConnected = false;
-        const errorMsg = `Server connection failed with status code: ${response.status}`;
-        ttsState.lastError = errorMsg;
-        return { connected: false, message: errorMsg };
+    const response = await fetch(`${settings.apiUrl}/audio/voices`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${decryptedApiKey}` // Use the (potentially migrated and now plaintext) API key
       }
-    } catch (connectionError) {
+    });
+
+    if (response.ok) {
+      ttsState.serverConnected = true;
+      return { connected: true, message: "Successfully connected to Kokoro TTS server" };
+    } else {
       ttsState.serverConnected = false;
-      const errorMsg = `Cannot connect to server: ${getUserFriendlyErrorMessage(connectionError.message)}`;
+      const errorText = await response.text().catch(() => "Could not read error response.");
+      const errorMsg = `Server connection failed: ${response.status} ${response.statusText || ''}. Server says: ${errorText}`;
       ttsState.lastError = errorMsg;
-      console.error('Error during server connection:', connectionError);
       return { connected: false, message: errorMsg };
     }
-  } catch (unexpectedError) {
-    console.error("Error in checkServerConnection:", unexpectedError);
-    return { connected: false, message: "An unexpected error occurred while checking server connection." };
-  }
-}
-
-// Encrypt a string using AES-GCM
-async function encryptText(text) {
-  // Ensure text is a string; if null/undefined, encrypt an empty string.
-  // Callers should decide if an empty string means 'not-needed'.
-  const plainText = (text === null || typeof text === 'undefined') ? "" : text;
-  
-  const key = await getKey();
-  const iv = crypto.getRandomValues(new Uint8Array(12)); // Standard IV size for AES-GCM
-  const encodedText = new TextEncoder().encode(plainText);
-  
-  const ciphertext = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv: iv },
-    key,
-    encodedText
-  );
-  
-  // Prepend IV to ciphertext for storage: IV (12 bytes) + Ciphertext
-  const resultBuffer = new Uint8Array(iv.length + ciphertext.byteLength);
-  resultBuffer.set(iv);
-  resultBuffer.set(new Uint8Array(ciphertext), iv.length);
-  
-  // Convert combined buffer to Base64 string for easier storage in chrome.storage
-  return btoa(String.fromCharCode.apply(null, resultBuffer));
-}
-
-// Decrypt a string using AES-GCM
-async function decryptText(encryptedBase64) {
-  if (!encryptedBase64) {
-     // If there's no encrypted text, return empty string.
-     // Callers (like checkServerConnection) will typically default this to 'not-needed'.
-     return ""; 
-  }
-  try {
-    const key = await getKey();
-    // Convert Base64 string back to Uint8Array
-    const encryptedData = Uint8Array.from(atob(encryptedBase64), c => c.charCodeAt(0));
-    
-    if (encryptedData.length < 12) { // IV is 12 bytes
-        console.warn("Encrypted data too short for AES-GCM, attempting direct Base64 decode as fallback.");
-        try {
-          // This might be an old, simply Base64 encoded key
-          return atob(encryptedBase64); 
-        } catch (e_atob) {
-          console.error("Direct Base64 decode fallback also failed.", e_atob);
-          throw new Error("Invalid encrypted data: too short and not valid Base64.");
-        }
-    }
-
-    const iv = encryptedData.slice(0, 12);
-    const ciphertext = encryptedData.slice(12);
-    
-    const decryptedBuffer = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: iv },
-      key,
-      ciphertext
-    );
-    
-    return new TextDecoder().decode(decryptedBuffer);
-  } catch (error) {
-    console.error("AES-GCM decryption failed:", error.message);
-    // Fallback for potentially old (non-AES-GCM) Base64 encoded keys
+  } catch (connectionError) {
+    ttsState.serverConnected = false;
+    let apiUrlForError = 'http://localhost:8880'; // Default
     try {
-      const fallbackPlaintext = atob(encryptedBase64);
-      console.log("AES-GCM decryption failed, but successfully fell back to simple Base64 decode.");
-      return fallbackPlaintext;
-    } catch (e_fallback) {
-      console.error("Fallback Base64 decryption also failed:", e_fallback.message);
-      // If all decryption attempts fail, throw an error to be handled by the caller.
-      // Callers usually default to 'not-needed' in their catch blocks.
-      throw new Error('Failed to decrypt API key using AES-GCM and Base64 fallback.');
-    }
+        const storedSettings = await chrome.storage.local.get('apiUrl');
+        if (storedSettings.apiUrl) apiUrlForError = storedSettings.apiUrl;
+    } catch(e) { /* ignore, use default */ }
+
+    const errorMsg = connectionError.message.includes("Failed to fetch") 
+      ? `Cannot connect to server at ${ (new URL(apiUrlForError)).origin }. Please check the URL and ensure the server is running.`
+      : `Connection error: ${getUserFriendlyErrorMessage(connectionError.message || "Unknown connection error.")}`;
+    ttsState.lastError = errorMsg;
+    console.error('Error during server connection test:', connectionError);
+    return { connected: false, message: errorMsg };
   }
 }
 
-const cryptoKeyName = 'kokoro_tts_encryption_key_v2'; // v2 to ensure a new key is used with AES-GCM
+// New function to handle saving settings from popup or other sources
+async function handleSettingsSave(settings) {
+  if (!settings) {
+    return { success: false, error: "No settings provided to save." };
+  }
 
-async function getStoredKey() {
+  const { apiUrl, apiKey, voice, chunkSize, maxCacheSize } = settings;
+
+  // Validate API Key before encrypting.
+  // 'not-needed' or empty string are considered valid special cases by validateApiKey.
+  // The encrypt function will also handle these by returning them as-is or as an empty string.
+  const validation = validateApiKey(apiKey); // apiKey here is plaintext
+  if (!validation.isValid) {
+    // Only error out if the key is not empty and not 'not-needed' but still invalid.
+    // If apiKey is "" or "not-needed", validateApiKey might say invalid based on length,
+    // but these are acceptable values to store (encrypt will handle them).
+    if (apiKey && apiKey !== 'not-needed') {
+        console.error("Invalid API key provided for saving:", validation.reason);
+        return { success: false, error: validation.reason || "Invalid API key format." };
+    }
+  }
+
   try {
-    const { [cryptoKeyName]: jwk } = await chrome.storage.local.get(cryptoKeyName);
-    if (jwk) {
+    // Encrypt the API key (encrypt function handles "" and "not-needed" appropriately)
+    const encryptedApiKey = await encrypt(apiKey); // apiKey is plaintext here
+
+    const settingsToSave = {
+      apiUrl: apiUrl.trim(),
+      apiKey: encryptedApiKey, // Store the encrypted version
+      voice: voice.trim(),
+      chunkSize: chunkSize,
+      maxCacheSize: maxCacheSize || '10' // Ensure maxCacheSize has a default
+    };
+
+    await chrome.storage.local.set(settingsToSave);
+    console.log('Settings saved successfully. API key encrypted:', encryptedApiKey !== 'not-needed' && encryptedApiKey !== '');
+    return { success: true };
+  } catch (error) {
+    console.error("Error encrypting or saving settings in handleSettingsSave:", error);
+    return { success: false, error: "Failed to encrypt and save API key. " + error.message };
+  }
+}
+
+// --- Refined AES-GCM Encryption Suite (256-bit) ---
+class MigrationNeededError extends Error {
+  constructor(message, migratedPlaintext) {
+    super(message);
+    this.name = "MigrationNeededError";
+    this.migratedPlaintext = migratedPlaintext;
+  }
+}
+
+// Constants for key derivation
+const DERIVED_KEY_NAME = 'kokoro_tts_derived_encryption_key_v3'; // v3 for new derivation
+const SALT_NAME = 'kokoro_tts_salt_v3'; // v3 for new salt
+const BASE_MATERIAL_NAME = 'kokoro_tts_base_key_material_v3'; // v3 for new base material
+const ITERATIONS = 200000; // Increased iterations for PBKDF2
+
+async function getEncryptionKey() {
+  // Try to get the already derived key
+  let { [DERIVED_KEY_NAME]: storedKeyMaterial } = await chrome.storage.local.get(DERIVED_KEY_NAME);
+  if (storedKeyMaterial) {
+    try {
       return await crypto.subtle.importKey(
-        "jwk",
-        jwk,
-        { name: "AES-GCM" },
-        true,
-        ["encrypt", "decrypt"]
+        "raw",
+        Uint8Array.from(atob(storedKeyMaterial), c => c.charCodeAt(0)).buffer,
+        { name: "AES-GCM" }, // Algorithm for the key
+        false, // Not extractable
+        ["encrypt", "decrypt"] // Key usages
       );
+    } catch (e) {
+      console.error("Failed to import stored derived key, will regenerate. Error:", e);
+      // Fall through to regenerate, remove potentially corrupted key
+      await chrome.storage.local.remove(DERIVED_KEY_NAME);
     }
-  } catch (error) {
-    console.error("Error importing stored key:", error);
   }
-  return null;
-}
 
-async function generateAndStoreKey() {
+  // If derived key isn't there or failed to import, generate it
+  // 1. Get or create a salt
+  let { [SALT_NAME]: saltString } = await chrome.storage.local.get(SALT_NAME);
+  let saltBuffer;
+  if (!saltString) {
+    const saltArray = crypto.getRandomValues(new Uint8Array(16)); // 16-byte salt
+    saltString = btoa(String.fromCharCode.apply(null, saltArray));
+    await chrome.storage.local.set({ [SALT_NAME]: saltString });
+    saltBuffer = saltArray.buffer;
+  } else {
+    saltBuffer = Uint8Array.from(atob(saltString), c => c.charCodeAt(0)).buffer;
+  }
+
+  // 2. Get or create base key material (this is the "password" for PBKDF2)
+  let { [BASE_MATERIAL_NAME]: baseMaterialString } = await chrome.storage.local.get(BASE_MATERIAL_NAME);
+  let baseMaterialBuffer;
+  if (!baseMaterialString) {
+    const newBaseMaterialArray = crypto.getRandomValues(new Uint8Array(32)); // 32-byte base material
+    baseMaterialString = btoa(String.fromCharCode.apply(null, newBaseMaterialArray));
+    await chrome.storage.local.set({ [BASE_MATERIAL_NAME]: baseMaterialString });
+    baseMaterialBuffer = newBaseMaterialArray.buffer;
+  } else {
+    baseMaterialBuffer = Uint8Array.from(atob(baseMaterialString), c => c.charCodeAt(0)).buffer;
+  }
+  
+  // 3. Import the base material as a CryptoKey for PBKDF2
+  let importedBaseKey;
   try {
-    const key = await crypto.subtle.generateKey(
-      { name: "AES-GCM", length: 256 },
-      true,
-      ["encrypt", "decrypt"]
+    importedBaseKey = await crypto.subtle.importKey(
+        "raw",
+        baseMaterialBuffer,
+        { name: "PBKDF2" }, // Specify the algorithm for which the key is to be used
+        false, // Not extractable
+        ["deriveKey"] // Usage: for deriving other keys
     );
-    const jwk = await crypto.subtle.exportKey("jwk", key);
-    await chrome.storage.local.set({ [cryptoKeyName]: jwk });
-    console.log("New AES-GCM encryption key generated and stored.");
-    return key;
-  } catch (error) {
-    console.error("Error generating and storing AES-GCM key:", error);
-    throw error; // Re-throw to indicate failure to the caller
+  } catch (e) {
+      console.error("Failed to import base material for PBKDF2. Error:", e);
+      // This is a critical failure if the base material is somehow corrupt and cannot be imported.
+      // For robustness, one might try to regenerate base material here, but that would mean
+      // existing encrypted data becomes undecryptable. For now, let the error propagate.
+      throw new Error("Could not prepare base key material for encryption key derivation.");
+  }
+
+  // 4. Derive the AES-GCM key using PBKDF2
+  const derivedKey = await crypto.subtle.deriveKey(
+    {
+      name: "PBKDF2",
+      salt: saltBuffer,
+      iterations: ITERATIONS,
+      hash: "SHA-256", // Hash function for PBKDF2
+    },
+    importedBaseKey, // The imported base key material
+    { name: "AES-GCM", length: 256 }, // Desired algorithm and length for the derived key
+    false, // Not extractable
+    ["encrypt", "decrypt"] // Usages for the derived key
+  );
+
+  // 5. Store the derived key (as raw material) for future use
+  const exportedKeyMaterial = await crypto.subtle.exportKey("raw", derivedKey);
+  await chrome.storage.local.set({ 
+    [DERIVED_KEY_NAME]: btoa(String.fromCharCode.apply(null, new Uint8Array(exportedKeyMaterial))) 
+  });
+  
+  console.log("New AES-GCM 256-bit derived encryption key generated and stored.");
+  return derivedKey;
+}
+
+async function encrypt(text) {
+  // Handle special cases: null, undefined, empty string, or "not-needed"
+  if (text === null || typeof text === 'undefined' || text === "") {
+    return ""; // Encrypting an empty string results in an empty string representation for storage
+  }
+  if (text === 'not-needed') {
+      return 'not-needed'; // "not-needed" is a special marker, store as is
+  }
+
+  const key = await getEncryptionKey();
+  const iv = crypto.getRandomValues(new Uint8Array(12)); // AES-GCM standard IV size is 12 bytes
+  const encodedText = new TextEncoder().encode(text); // Convert plaintext to Uint8Array
+
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: iv }, // Algorithm parameters: specify AES-GCM and the IV
+    key, // The encryption key
+    encodedText // The data to encrypt
+  );
+
+  // Combine IV and ciphertext for storage: IV (12 bytes) + Ciphertext
+  const resultBuffer = new Uint8Array(iv.length + ciphertext.byteLength);
+  resultBuffer.set(iv); // Prepend IV
+  resultBuffer.set(new Uint8Array(ciphertext), iv.length); // Append ciphertext
+  
+  // Convert to Base64 string with a prefix for easy identification
+  return `aesgcm:${btoa(String.fromCharCode.apply(null, resultBuffer))}`;
+}
+
+// Heuristic to detect if a string *might* be an old Base64 encoded key
+function isOldBase64Format(text) {
+  if (!text || typeof text !== 'string') return false;
+  // If it has our new prefix, it's not old format.
+  // "not-needed" is also not old format.
+  if (text.startsWith('aesgcm:') || text === 'not-needed') {
+    return false;
+  }
+  // Try to decode it. If it decodes without error, it's likely Base64.
+  // This is a simple check; more robust validation might be needed if non-Base64 strings
+  // could accidentally pass this.
+  try {
+    // Check for typical Base64 characters and padding.
+    // A valid Base64 string's length is a multiple of 4.
+    if (text.length % 4 !== 0) return false;
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(text)) return false;
+
+    atob(text); // If this doesn't throw, it's valid Base64
+    return true;
+  } catch (e) {
+    return false; // Not valid Base64
   }
 }
 
-async function getKey() {
-  let key = await getStoredKey();
-  if (!key) {
-    key = await generateAndStoreKey();
+async function decrypt(encryptedText) {
+  // Handle cases where decryption isn't needed or possible
+  if (!encryptedText || encryptedText === "" || encryptedText === 'not-needed') {
+    return encryptedText === 'not-needed' ? 'not-needed' : "";
   }
-  return key;
+
+  // Check for old Base64 format and trigger migration if detected
+  if (isOldBase64Format(encryptedText)) {
+    console.log("Old Base64 format API key detected during decryption attempt.");
+    try {
+      const plaintext = atob(encryptedText);
+      // Throw a special error to signal that migration is needed.
+      // The caller should catch this, re-encrypt the plaintext, and update storage.
+      throw new MigrationNeededError("API key is in old Base64 format and needs migration.", plaintext);
+    } catch (e_atob) {
+      console.error("Failed to decode suspected old Base64 format API key during migration attempt:", e_atob, "Value was:", encryptedText);
+      // If it looked like Base64 but failed to decode, it's an invalid/corrupt key.
+      throw new Error("Invalid API key: suspected old Base64 format but failed to decode.");
+    }
+  }
+
+  // If not old format, it must have the 'aesgcm:' prefix for new encrypted keys
+  if (!encryptedText.startsWith('aesgcm:')) {
+    console.warn(`API key is not in a recognizable encrypted format: "${encryptedText}". It lacks the 'aesgcm:' prefix and wasn't identified as old Base64.`);
+    // This could be an unencrypted key saved by mistake, or a corrupted key.
+    // If it's not "not-needed" or empty, and not a known format, it's an issue.
+    // Throw an error as we cannot decrypt it.
+    throw new Error(`Invalid API key format for decryption. Value: "${encryptedText}"`);
+  }
+
+  const key = await getEncryptionKey();
+  const encryptedDataB64 = encryptedText.substring('aesgcm:'.length);
+  let encryptedData;
+  try {
+    encryptedData = Uint8Array.from(atob(encryptedDataB64), c => c.charCodeAt(0));
+  } catch (e) {
+    console.error("Failed to Base64 decode the AES-GCM ciphertext part:", e);
+    throw new Error("Invalid AES-GCM ciphertext encoding (Base64 decoding failed).");
+  }
+
+  if (encryptedData.length < 12) { // IV is 12 bytes
+    console.error("AES-GCM encrypted data is too short (less than 12 bytes for IV).");
+    throw new Error("Invalid AES-GCM encrypted data: too short to contain IV.");
+  }
+
+  const iv = encryptedData.slice(0, 12); // Extract the IV (first 12 bytes)
+  const ciphertext = encryptedData.slice(12); // The rest is the ciphertext
+
+  try {
+    const decryptedBuffer = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: iv }, // Algorithm parameters
+      key, // The decryption key
+      ciphertext // The data to decrypt
+    );
+    return new TextDecoder().decode(decryptedBuffer); // Decode Uint8Array back to string
+  } catch (error) {
+    console.error("AES-GCM decryption failed:", error);
+    // This error is critical. It might mean the key is wrong, data is corrupt,
+    // or the key derivation changed incompatibly.
+    throw new Error('Failed to decrypt API key with AES-GCM. The key might be corrupted, from a different installation, or the encryption method changed.');
+  }
 }
+
+// Validate the format of a plaintext API key
+function validateApiKey(apiKey) {
+  // "not-needed" and empty string are considered valid special cases (bypass other checks)
+  if (apiKey === 'not-needed' || apiKey === "") {
+    return { isValid: true, reason: "Key is designated as not needed or is empty." };
+  }
+
+  if (typeof apiKey !== 'string') {
+    return { isValid: false, reason: "API key must be a string." };
+  }
+
+  // Example: Check for a reasonable length. Adjust as per actual API key constraints.
+  // This is a basic check; more specific rules (e.g., character sets) can be added.
+  if (apiKey.length < 8 || apiKey.length > 256) {
+    return { isValid: false, reason: "API key length is invalid. It should be between 8 and 256 characters." };
+  }
+  
+  // Example: Check for non-printable characters (optional, depends on key format)
+  // if (/[\\x00-\\x1F\\x7F]/.test(apiKey)) {
+  //   return { isValid: false, reason: "API key contains non-printable characters." };
+  // }
+
+  return { isValid: true };
+}
+// --- End of Refined AES-GCM Encryption Suite ---
