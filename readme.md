@@ -175,7 +175,7 @@ This extension uses:
 ## Credits
 
 - Extension developed by the community
-- Significant improvements and code enhancements by [Claude AI](https://claude.ai)
+- Significant improvements and code enhancements by ChatGPT, GitHub Copilot, and Claude AI
 - Kokoro TTS model and server by [remsky](https://github.com/remsky)
 - Icons and UI design by the development team
 
