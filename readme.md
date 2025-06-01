@@ -5,11 +5,11 @@ A Chrome extension for text-to-speech using the Kokoro TTS API, allowing you to 
 ## Screenshots
 
 ### Main Interface
-![Screenshot 1](Screenshot%201.png)
+![Screenshot 1](Screenshot_1.png)
 *Main control panel with text selection and playback controls*
 
-### Settings Panel  
-![Screenshot 2](Screenshot%202.png)
+### Settings Panel
+![Screenshot 2](Screenshot_2.png)
 *Configuration settings for API, voice, and performance options*
 
 ![Kokoro TTS Reader](koko-tts.png)
@@ -200,7 +200,7 @@ We welcome contributions! Please feel free to:
 
 ## License
 
-[MIT License](LICENSE)
+[MIT License](LICENSE.md)
 
 ---
 
