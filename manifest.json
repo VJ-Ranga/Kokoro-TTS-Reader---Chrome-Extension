@@ -3,6 +3,7 @@
   "name": "Kokoro TTS Reader",
   "version": "4.1",
   "description": "Advanced text-to-speech extension using Kokoro TTS API with background playback, smart caching, and robust error handling",
+  "homepage_url": "https://github.com/yourusername/kokoro-tts-reader",
   "permissions": [
     "contextMenus",
     "storage",
