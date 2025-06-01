@@ -1,7 +1,4 @@
 document.addEventListener('DOMContentLoaded', function() {
-  // Check server connection when popup opens
-  testServerConnection();
-  
   // Get the last selected text when popup opens
   loadSelectedText();
   
@@ -86,14 +83,46 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('api-url').value = items.apiUrl;
     document.getElementById('voice').value = items.voice;
     document.getElementById('chunk-size').value = items.chunkSize;
+    
+    // Load API key separately and decrypt it for display
+    chrome.runtime.sendMessage({ action: 'getDecryptedApiKey' }, function(response) {
+      if (response && response.success && response.apiKey) {
+        // Only show the API key if it's not the default
+        if (response.apiKey !== 'not-needed' && response.apiKey !== '') {
+          document.getElementById('api-key').value = response.apiKey;
+        }
+      }
+    });
   });
 
-// Save settings
+  // Save settings
   document.getElementById('save-settings').addEventListener('click', function() {
+    const saveBtn = this;
+    const originalText = saveBtn.textContent;
+    
+    // Show loading state
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving...';
+    
     const apiUrl = document.getElementById('api-url').value.trim();
     const apiKey = document.getElementById('api-key').value.trim(); // Plaintext API key from input
     const voice = document.getElementById('voice').value.trim();
     const chunkSize = document.getElementById('chunk-size').value;
+
+    // Basic validation before sending
+    if (!apiUrl) {
+      showError("API URL is required");
+      saveBtn.disabled = false;
+      saveBtn.textContent = originalText;
+      return;
+    }
+
+    if (!voice) {
+      showError("Voice is required");
+      saveBtn.disabled = false;
+      saveBtn.textContent = originalText;
+      return;
+    }
 
     // Send to background for proper validation and encryption
     chrome.runtime.sendMessage({ 
@@ -106,6 +135,10 @@ document.addEventListener('DOMContentLoaded', function() {
         maxCacheSize: '10' // Default maxCacheSize, consider making this configurable
       }
     }, function(response) {
+      // Reset button state
+      saveBtn.disabled = false;
+      saveBtn.textContent = originalText;
+      
       if (chrome.runtime.lastError) {
         console.error("Error sending saveSettings message:", chrome.runtime.lastError.message);
         showError("Error saving settings: " + chrome.runtime.lastError.message);
@@ -114,14 +147,17 @@ document.addEventListener('DOMContentLoaded', function() {
 
       if (response && response.success) {
         const successElement = document.getElementById('save-success');
-        successElement.textContent = 'Settings saved successfully!'; // More informative message
+        successElement.textContent = 'Settings saved successfully!';
         successElement.style.display = 'block';
         setTimeout(() => {
           successElement.style.display = 'none';
-        }, 3000); // Increased display time
+        }, 3000);
         
-        // Clear the API key input field for security, as it was plaintext
-        document.getElementById('api-key').value = '';
+        // Only clear the API key input field if save was successful
+        // and if it's not a special value
+        if (apiKey !== 'not-needed' && apiKey !== '') {
+          document.getElementById('api-key').value = '';
+        }
         
         // Test connection with new settings to update status display
         testServerConnection();
@@ -135,6 +171,7 @@ document.addEventListener('DOMContentLoaded', function() {
   });
   // Test connection button
   document.getElementById('test-connection').addEventListener('click', function() {
+    console.log('Test connection button clicked');
     testServerConnection();
   });
 
@@ -313,18 +350,6 @@ document.addEventListener('DOMContentLoaded', function() {
     });
   }
   
-  // Function to show error message
-  function showError(message) {
-    const errorDiv = document.getElementById('error-message');
-    errorDiv.textContent = message;
-    errorDiv.style.display = 'block';
-    
-    // Hide error after 5 seconds
-    setTimeout(() => {
-      errorDiv.style.display = 'none';
-    }, 5000);
-  }
-  
   // Function to load the last selected text
   function loadSelectedText() {
     chrome.runtime.sendMessage({ action: 'getLastSelectedText' }, function(response) {
@@ -360,28 +385,60 @@ document.addEventListener('DOMContentLoaded', function() {
   // Function to test server connection
   function testServerConnection() {
     const serverStatus = document.getElementById('server-status');
+    const apiUrl = document.getElementById('api-url').value.trim() || 'http://localhost:8880';
+    
     serverStatus.textContent = 'Checking server connection...';
     serverStatus.style.color = '#666';
     serverStatus.style.borderLeftColor = '#ccc';
     
-    chrome.runtime.sendMessage({ action: 'checkServer' }, function(response) {
-      if (chrome.runtime.lastError) {
-        console.log("Error testing connection:", chrome.runtime.lastError.message);
-        serverStatus.textContent = 'Could not check server connection';
-        serverStatus.style.color = '#ea4335';
-        serverStatus.style.borderLeftColor = '#ea4335';
-        return;
-      }
-      
+    // Add a timeout for the connection test
+    const timeoutPromise = new Promise((resolve) => {
+      setTimeout(() => {
+        resolve({ connected: false, message: 'Connection test timed out (server may not be running)' });
+      }, 5000); // 5 second timeout
+    });
+    
+    const testPromise = new Promise((resolve) => {
+      chrome.runtime.sendMessage({ action: 'checkServer' }, function(response) {
+        if (chrome.runtime.lastError) {
+          console.log("Error testing connection:", chrome.runtime.lastError.message);
+          resolve({ connected: false, message: 'Could not check server connection: ' + chrome.runtime.lastError.message });
+        } else {
+          resolve(response || { connected: false, message: 'No response from server check' });
+        }
+      });
+    });
+    
+    // Race between the test and timeout
+    Promise.race([testPromise, timeoutPromise]).then(response => {
       if (response && response.connected) {
-        serverStatus.textContent = 'Server connection: Success \u2713';
+        serverStatus.innerHTML = 'Server connection: Success <span style="color: #34a853; font-weight: bold;">✓</span>';
         serverStatus.style.color = '#34a853';
         serverStatus.style.borderLeftColor = '#34a853';
       } else {
-        serverStatus.textContent = `Server connection failed: ${response ? response.message : 'Unknown error'}`;
+        const message = response ? response.message : 'Unknown error';
+        serverStatus.textContent = `Server not available: ${message}`;
         serverStatus.style.color = '#ea4335';
         serverStatus.style.borderLeftColor = '#ea4335';
+        
+        // Show helpful message for localhost setup
+        if (apiUrl.includes('localhost')) {
+          serverStatus.textContent += ' (Is your Kokoro server running?)';
+        }
       }
     });
+  }
+  
+  // Function to show error message with enhanced styling
+  function showError(message) {
+    const errorDiv = document.getElementById('error-message');
+    errorDiv.textContent = message;
+    errorDiv.style.display = 'block';
+    
+    // Auto-hide based on message length (longer messages stay visible longer)
+    const hideDelay = Math.max(3000, message.length * 50); // At least 3 seconds, +50ms per character
+    setTimeout(() => {
+      errorDiv.style.display = 'none';
+    }, hideDelay);
   }
 });

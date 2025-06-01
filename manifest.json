@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Kokoro TTS Reader",
-  "version": "4.0",
-  "description": "Text-to-speech extension using Kokoro TTS API with background playback",
+  "version": "4.1",
+  "description": "Advanced text-to-speech extension using Kokoro TTS API with background playback, smart caching, and robust error handling",
   "permissions": [
     "contextMenus",
     "storage",

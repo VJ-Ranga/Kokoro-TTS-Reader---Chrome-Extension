@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
+  <meta charset="UTF-8">
   <title>Kokoro TTS Reader</title>
   <style>
     body {
@@ -358,12 +359,14 @@
       
       <div class="form-group">
         <label for="api-key">API Key (if needed):</label>
-        <input type="text" id="api-key" placeholder="not-needed">
+        <input type="password" id="api-key" placeholder="not-needed">
+        <small style="color: #666; font-size: 11px;">Leave empty to keep existing key. Use 'not-needed' if no authentication required.</small>
       </div>
       
       <div class="form-group">
         <label for="voice">Voice:</label>
         <input type="text" id="voice" placeholder="af_bella">
+        <small style="color: #666; font-size: 11px;">Popular voices: af_bella, am_adam, bf_emma, bm_lewis, jf_alpha, zf_xiaobei</small>
       </div>
       
       <div class="form-group">
@@ -373,6 +376,17 @@
           <option value="500">500 (Low-end systems)</option>
           <option value="1000" selected>1000 (Recommended)</option>
           <option value="1500">1500 (Higher-end systems)</option>
+          <option value="2000">2000 (High-end systems)</option>
+        </select>
+      </div>
+      
+      <div class="form-group">
+        <label for="max-cache-size">Audio Cache Size (chunks):</label>
+        <select id="max-cache-size">
+          <option value="5">5 (Low memory)</option>
+          <option value="10" selected>10 (Recommended)</option>
+          <option value="15">15 (High memory)</option>
+          <option value="20">20 (Maximum performance)</option>
         </select>
       </div>
       
@@ -381,7 +395,7 @@
       <div id="save-success" class="success-message">Settings saved successfully!</div>
     </div>
     
-    <div id="server-status" class="status">Checking server connection...</div>
+    <div id="server-status" class="status">Click "Test Connection" to check server status</div>
     <button id="test-connection">Test Connection</button>
   </div>
 

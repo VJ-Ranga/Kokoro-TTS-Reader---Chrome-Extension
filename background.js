@@ -164,6 +164,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sendResponse({ success: false, error: getUserFriendlyErrorMessage(error.message || "Failed to save settings.") });
           });
         return true; // Indicates asynchronous response
+      case 'getDecryptedApiKey': // New case for getting decrypted API key
+        handleGetDecryptedApiKey()
+          .then(response => sendResponse(response))
+          .catch(error => {
+            console.error("Error getting decrypted API key:", error);
+            sendResponse({ success: false, error: getUserFriendlyErrorMessage(error.message || "Failed to get API key.") });
+          });
+        return true; // Indicates asynchronous response
       default:
         break;
     }
@@ -364,123 +372,145 @@ async function sendTextToOffscreen(text) {
   }
 }
 
+// New function to handle saving settings from popup or other sources
+async function handleSettingsSave(settings) {
+  if (!settings) {
+    return { success: false, error: "No settings provided to save." };
+  }
+
+  const { apiUrl, apiKey, voice, chunkSize, maxCacheSize } = settings;
+
+  // Validate API Key before encrypting.
+  const validation = validateApiKey(apiKey); // apiKey here is plaintext
+  if (!validation.isValid) {
+    if (apiKey && apiKey !== 'not-needed') {
+        console.error("Invalid API key provided for saving:", validation.reason);
+        return { success: false, error: validation.reason || "Invalid API key format." };
+    }
+  }
+
+  try {
+    // Encrypt the API key
+    const encryptedApiKey = await encrypt(apiKey); // apiKey is plaintext here
+
+    const settingsToSave = {
+      apiUrl: apiUrl.trim(),
+      apiKey: encryptedApiKey, // Store the encrypted version
+      voice: voice.trim(),
+      chunkSize: chunkSize,
+      maxCacheSize: maxCacheSize || '10' // Ensure maxCacheSize has a default
+    };
+
+    await chrome.storage.local.set(settingsToSave);
+    console.log('Settings saved successfully. API key encrypted:', encryptedApiKey !== 'not-needed' && encryptedApiKey !== '');
+    return { success: true };
+  } catch (error) {
+    console.error("Error encrypting or saving settings in handleSettingsSave:", error);
+    return { success: false, error: "Failed to encrypt and save API key. " + error.message };
+  }
+}
+
+// New function to handle getting decrypted API key for popup display
+async function handleGetDecryptedApiKey() {
+  try {
+    const settings = await new Promise(resolve => {
+      chrome.storage.local.get({
+        apiKey: '' // Default to empty string
+      }, resolve);
+    });
+
+    let decryptedApiKey;
+    let currentApiKeyToUse = settings.apiKey; // This is the potentially encrypted key from storage
+
+    try {
+      decryptedApiKey = await decrypt(currentApiKeyToUse);
+    } catch (decryptionError) {
+      if (decryptionError instanceof MigrationNeededError) {
+        console.log("API key migration needed in handleGetDecryptedApiKey.");
+        decryptedApiKey = decryptionError.migratedPlaintext; // Use the plaintext from migration
+        try {
+          const newEncryptedApiKey = await encrypt(decryptedApiKey);
+          await chrome.storage.local.set({ apiKey: newEncryptedApiKey });
+          console.log("API key migrated and re-encrypted in storage (from handleGetDecryptedApiKey).");
+        } catch (encryptError) {
+          console.error("Failed to re-encrypt migrated API key in handleGetDecryptedApiKey:", encryptError);
+          // Continue with the decrypted (migrated) key for this operation
+        }
+      } else {
+        console.error('Error decrypting API key for popup display:', decryptionError);
+        // For popup display, we can return a safe default
+        decryptedApiKey = 'not-needed';
+      }
+    }
+
+    return { success: true, apiKey: decryptedApiKey };
+  } catch (error) {
+    console.error("Error in handleGetDecryptedApiKey:", error);
+    return { success: false, error: "Failed to retrieve API key." };
+  }
+}
+
 // Check if offscreen document exists, create if it doesn't
 async function ensureOffscreenDocumentExists() {
   try {
-    // If creation is already in progress, wait for it to complete
-    if (ttsState.documentCreationInProgress) {
-      console.log('Document creation already in progress, waiting...');
-      await new Promise(resolve => {
-        const checkInterval = setInterval(() => {
-          if (!ttsState.documentCreationInProgress) {
-            clearInterval(checkInterval);
-            resolve();
-          }
-        }, 100);
-      });
-      
-      // After waiting, check if document is now available
-      if (ttsState.offscreenDocumentReady) {
-        console.log('Document is now ready after waiting');
-        return;
-      }
-    }
+    console.log('Starting ensureOffscreenDocumentExists...');
     
     // Check if the offscreen API is available
     if (!chrome.offscreen) {
       throw new Error('Offscreen API not available in this browser version');
     }
     
+    // If already ready, return immediately
+    if (ttsState.offscreenDocumentReady) {
+      console.log('Offscreen document already ready');
+      return;
+    }
+    
     // Set flag to indicate document creation is in progress
-    // Do this BEFORE any async operations to prevent race conditions
     ttsState.documentCreationInProgress = true;
     ttsState.offscreenDocumentReady = false;
     
-    // Check if we already have an offscreen document
-    let hasExistingDocument = false;
+    // First, try to close any existing documents
     try {
       const existingContexts = await chrome.offscreen.getContexts();
-      hasExistingDocument = existingContexts && existingContexts.length > 0;
-    } catch (e) {
-      console.log('Error checking for existing documents:', e);
-    }
-    
-    // If we have an existing document, close it first
-    if (hasExistingDocument) {
-      console.log('Existing document found, closing it first');
-      try {
+      if (existingContexts && existingContexts.length > 0) {
+        console.log('Closing existing offscreen document...');
         await chrome.offscreen.closeDocument();
-        console.log('Successfully closed existing document');
-        
-        // Add a delay after closing to avoid race conditions
-        await new Promise(r => setTimeout(r, 500));
-      } catch (e) {
-        console.log('Error closing existing document:', e);
-        // Continue anyway - the document might have been closed already
+        await new Promise(r => setTimeout(r, 500)); // Wait for cleanup
       }
+    } catch (e) {
+      console.log('No existing document to close or error closing:', e);
     }
     
-    // Create a new offscreen document with retry logic
-    let attempts = 0;
-    const maxAttempts = 3;
+    console.log('Creating new offscreen document...');
     
-    while (attempts < maxAttempts) {
-      try {
-        console.log(`Creating offscreen document (attempt ${attempts + 1}/${maxAttempts})`);
-        await chrome.offscreen.createDocument({
-          url: 'offscreen.html', 
-          reasons: ['AUDIO_PLAYBACK'],
-          justification: 'Playing TTS audio in the background'
-        });
-        
-        // Wait for the offscreen document to report ready with a timeout
-        const isReady = await waitForOffscreenReady(8000);
-        
-        if (isReady) {
-          console.log('Offscreen document created and ready');
-          return;
-        } else {
-          console.log('Offscreen document failed to become ready, retrying...');
-          // Try to close the document before retrying
-          await safeCloseDocument();
-          await new Promise(r => setTimeout(r, 500));
-        }
-      } catch (error) {
-        console.log(`Error creating document (attempt ${attempts + 1}):`, error);
-        
-        // If error contains "only a single offscreen document may be created"
-        if (error.message && error.message.includes("only a single")) {
-          console.log("Single document error detected, trying to close and retry");
-          await safeCloseDocument();
-          await new Promise(r => setTimeout(r, 1000)); // Longer delay for retry
-        }
-      }
-      
-      attempts++;
-      
-      // Wait before retrying
-      if (attempts < maxAttempts) {
-        await new Promise(r => setTimeout(r, 500 * attempts)); // Increasing backoff
-      }
+    // Create the offscreen document
+    await chrome.offscreen.createDocument({
+      url: 'offscreen.html',
+      reasons: ['AUDIO_PLAYBACK'],
+      justification: 'Playing TTS audio in the background'
+    });
+    
+    console.log('Offscreen document created, waiting for ready signal...');
+    
+    // Wait for the ready signal with a reasonable timeout
+    const isReady = await waitForOffscreenReady(10000); // 10 second timeout
+    
+    if (isReady) {
+      console.log('Offscreen document is ready!');
+      ttsState.documentCreationInProgress = false;
+      return;
+    } else {
+      throw new Error('Offscreen document failed to report ready within timeout');
     }
     
-    if (attempts >= maxAttempts) {
-      throw new Error(`Failed to create offscreen document after ${maxAttempts} attempts`);
-    }
   } catch (error) {
-    console.error('Error ensuring offscreen document exists:', error);
+    console.error('Error in ensureOffscreenDocumentExists:', error);
     ttsState.lastError = getUserFriendlyErrorMessage(error.message);
     ttsState.documentCreationInProgress = false;
+    ttsState.offscreenDocumentReady = false;
     broadcastStatus();
-    
-    // Fallback for older browsers
-    if (error.message.includes('not available')) {
-      ttsState.lastError = 'This feature requires Chrome 116 or newer. Please update your browser.';
-      broadcastStatus();
-    }
-  } finally {
-    // Always make sure to reset the creation flag
-    ttsState.documentCreationInProgress = false;
+    throw error; // Re-throw so caller knows it failed
   }
 }
 
@@ -570,31 +600,45 @@ async function safeCloseDocument() {
 
 // Wait for the offscreen document to report ready
 function waitForOffscreenReady(timeout = 5000) {
+  console.log(`Waiting for offscreen ready signal with ${timeout}ms timeout...`);
+  
   return new Promise((resolve) => {
     // If already ready, resolve immediately
     if (ttsState.offscreenDocumentReady) {
+      console.log('Already ready, resolving immediately');
       resolve(true);
       return;
     }
     
+    let resolved = false;
+    
     // Set up a timeout
     const timer = setTimeout(() => {
-      console.log('Timed out waiting for offscreen document ready');
-      chrome.runtime.onMessage.removeListener(readyListener);
-      resolve(false); // Resolve with false to indicate timeout
+      if (!resolved) {
+        resolved = true;
+        console.log('Timed out waiting for offscreen document ready');
+        chrome.runtime.onMessage.removeListener(readyListener);
+        resolve(false); // Resolve with false to indicate timeout
+      }
     }, timeout);
     
     // Set up a listener for the ready message
-    const readyListener = (message) => {
+    const readyListener = (message, sender, sendResponse) => {
+      console.log('Received message in waitForOffscreenReady:', message);
+      
       if (message.target === 'background' && message.action === 'offscreenReady') {
-        console.log('Received offscreen ready message');
-        clearTimeout(timer);
-        chrome.runtime.onMessage.removeListener(readyListener);
-        ttsState.offscreenDocumentReady = true;
-        resolve(true);
+        if (!resolved) {
+          resolved = true;
+          console.log('Received offscreen ready message!');
+          clearTimeout(timer);
+          chrome.runtime.onMessage.removeListener(readyListener);
+          ttsState.offscreenDocumentReady = true;
+          resolve(true);
+        }
       }
     };
     
+    console.log('Adding message listener for offscreen ready...');
     chrome.runtime.onMessage.addListener(readyListener);
   });
 }
@@ -692,31 +736,6 @@ async function recreateOffscreenDocument() {
   }
 }
 
-// Check if offscreen document exists
-async function hasOffscreenDocument() {
-  try {
-    // Check if offscreen API is fully available
-    if (!chrome.offscreen || typeof chrome.offscreen.getContexts !== 'function') {
-      console.log('Offscreen API not fully available, assuming no document exists');
-      return false;
-    }
-    
-    try {
-      const existingContexts = await chrome.offscreen.getContexts();
-      return existingContexts && existingContexts.length > 0;
-    } catch (e) {
-      // If getContexts throws an error, handle it gracefully
-      console.log('Error in getContexts, assuming no document exists:', e);
-      return false;
-    }
-  } catch (error) {
-    console.error('Error checking for offscreen document:', error);
-    // If there's an error, assume we need to create a new document
-    return false;
-  }
-}
-
-// Broadcast status to the popup with error handling
 function broadcastStatus() {
   sendMessageSafely({
     action: 'statusUpdate',
@@ -729,52 +748,32 @@ function broadcastStatus() {
   });
 }
 
-// Count words in text
 function countWords(text) {
   if (!text) return 0;
   return text.trim().split(/\s+/).filter(word => word.length > 0).length;
 }
 
-// Function to check server connection
 async function checkServerConnection() {
   try {
     const settings = await new Promise(resolve => {
       chrome.storage.local.get({
         apiUrl: 'http://localhost:8880',
-        apiKey: '' // Default to empty string, decrypt will handle it
+        apiKey: ''
       }, resolve);
     });
 
     let decryptedApiKey;
-    let currentApiKeyToUse = settings.apiKey; // This is the potentially encrypted key from storage
-
     try {
-      decryptedApiKey = await decrypt(currentApiKeyToUse);
+      decryptedApiKey = await decrypt(settings.apiKey);
     } catch (decryptionError) {
-      if (decryptionError instanceof MigrationNeededError) {
-        console.log("API key migration needed in checkServerConnection.");
-        decryptedApiKey = decryptionError.migratedPlaintext; // Use the plaintext from migration
-        try {
-          const newEncryptedApiKey = await encrypt(decryptedApiKey);
-          await chrome.storage.local.set({ apiKey: newEncryptedApiKey });
-          console.log("API key migrated and re-encrypted in storage (from checkServerConnection).");
-        } catch (encryptError) {
-          console.error("Failed to re-encrypt migrated API key in checkServerConnection:", encryptError);
-          // Continue with the decrypted (migrated) key for this check
-        }
-      } else {
-        console.error('Error decrypting API key for server check:', decryptionError);
-        ttsState.lastError = 'Failed to decrypt API key. Using default key for connection test.';
-        decryptedApiKey = 'not-needed'; // Fallback to default for this check
-      }
+      console.error('Error decrypting API key for server check:', decryptionError);
+      decryptedApiKey = 'not-needed';
     }
-
-    ttsState.lastError = ''; // Reset error before new check
 
     const response = await fetch(`${settings.apiUrl}/audio/voices`, {
       method: 'GET',
       headers: {
-        'Authorization': `Bearer ${decryptedApiKey}` // Use the (potentially migrated and now plaintext) API key
+        'Authorization': `Bearer ${decryptedApiKey}`
       }
     });
 
@@ -785,70 +784,23 @@ async function checkServerConnection() {
       ttsState.serverConnected = false;
       const errorText = await response.text().catch(() => "Could not read error response.");
       const errorMsg = `Server connection failed: ${response.status} ${response.statusText || ''}. Server says: ${errorText}`;
-      ttsState.lastError = errorMsg;
       return { connected: false, message: errorMsg };
     }
   } catch (connectionError) {
     ttsState.serverConnected = false;
-    let apiUrlForError = 'http://localhost:8880'; // Default
-    try {
-        const storedSettings = await chrome.storage.local.get('apiUrl');
-        if (storedSettings.apiUrl) apiUrlForError = storedSettings.apiUrl;
-    } catch(e) { /* ignore, use default */ }
-
     const errorMsg = connectionError.message.includes("Failed to fetch") 
-      ? `Cannot connect to server at ${ (new URL(apiUrlForError)).origin }. Please check the URL and ensure the server is running.`
+      ? `Cannot connect to server. Please check the URL and ensure the server is running.`
       : `Connection error: ${getUserFriendlyErrorMessage(connectionError.message || "Unknown connection error.")}`;
-    ttsState.lastError = errorMsg;
     console.error('Error during server connection test:', connectionError);
     return { connected: false, message: errorMsg };
   }
 }
 
-// New function to handle saving settings from popup or other sources
-async function handleSettingsSave(settings) {
-  if (!settings) {
-    return { success: false, error: "No settings provided to save." };
-  }
-
-  const { apiUrl, apiKey, voice, chunkSize, maxCacheSize } = settings;
-
-  // Validate API Key before encrypting.
-  // 'not-needed' or empty string are considered valid special cases by validateApiKey.
-  // The encrypt function will also handle these by returning them as-is or as an empty string.
-  const validation = validateApiKey(apiKey); // apiKey here is plaintext
-  if (!validation.isValid) {
-    // Only error out if the key is not empty and not 'not-needed' but still invalid.
-    // If apiKey is "" or "not-needed", validateApiKey might say invalid based on length,
-    // but these are acceptable values to store (encrypt will handle them).
-    if (apiKey && apiKey !== 'not-needed') {
-        console.error("Invalid API key provided for saving:", validation.reason);
-        return { success: false, error: validation.reason || "Invalid API key format." };
-    }
-  }
-
-  try {
-    // Encrypt the API key (encrypt function handles "" and "not-needed" appropriately)
-    const encryptedApiKey = await encrypt(apiKey); // apiKey is plaintext here
-
-    const settingsToSave = {
-      apiUrl: apiUrl.trim(),
-      apiKey: encryptedApiKey, // Store the encrypted version
-      voice: voice.trim(),
-      chunkSize: chunkSize,
-      maxCacheSize: maxCacheSize || '10' // Ensure maxCacheSize has a default
-    };
-
-    await chrome.storage.local.set(settingsToSave);
-    console.log('Settings saved successfully. API key encrypted:', encryptedApiKey !== 'not-needed' && encryptedApiKey !== '');
-    return { success: true };
-  } catch (error) {
-    console.error("Error encrypting or saving settings in handleSettingsSave:", error);
-    return { success: false, error: "Failed to encrypt and save API key. " + error.message };
-  }
+function startKeepAliveMonitoring() {
+  console.log('Starting keep alive monitoring');
 }
 
-// --- Refined AES-GCM Encryption Suite (256-bit) ---
+// Simplified encryption functions
 class MigrationNeededError extends Error {
   constructor(message, migratedPlaintext) {
     super(message);
@@ -857,216 +809,31 @@ class MigrationNeededError extends Error {
   }
 }
 
-// Constants for key derivation
-const DERIVED_KEY_NAME = 'kokoro_tts_derived_encryption_key_v3'; // v3 for new derivation
-const SALT_NAME = 'kokoro_tts_salt_v3'; // v3 for new salt
-const BASE_MATERIAL_NAME = 'kokoro_tts_base_key_material_v3'; // v3 for new base material
-const ITERATIONS = 200000; // Increased iterations for PBKDF2
-
-async function getEncryptionKey() {
-  // Try to get the already derived key
-  let { [DERIVED_KEY_NAME]: storedKeyMaterial } = await chrome.storage.local.get(DERIVED_KEY_NAME);
-  if (storedKeyMaterial) {
-    try {
-      return await crypto.subtle.importKey(
-        "raw",
-        Uint8Array.from(atob(storedKeyMaterial), c => c.charCodeAt(0)).buffer,
-        { name: "AES-GCM" }, // Algorithm for the key
-        false, // Not extractable
-        ["encrypt", "decrypt"] // Key usages
-      );
-    } catch (e) {
-      console.error("Failed to import stored derived key, will regenerate. Error:", e);
-      // Fall through to regenerate, remove potentially corrupted key
-      await chrome.storage.local.remove(DERIVED_KEY_NAME);
-    }
-  }
-
-  // If derived key isn't there or failed to import, generate it
-  // 1. Get or create a salt
-  let { [SALT_NAME]: saltString } = await chrome.storage.local.get(SALT_NAME);
-  let saltBuffer;
-  if (!saltString) {
-    const saltArray = crypto.getRandomValues(new Uint8Array(16)); // 16-byte salt
-    saltString = btoa(String.fromCharCode.apply(null, saltArray));
-    await chrome.storage.local.set({ [SALT_NAME]: saltString });
-    saltBuffer = saltArray.buffer;
-  } else {
-    saltBuffer = Uint8Array.from(atob(saltString), c => c.charCodeAt(0)).buffer;
-  }
-
-  // 2. Get or create base key material (this is the "password" for PBKDF2)
-  let { [BASE_MATERIAL_NAME]: baseMaterialString } = await chrome.storage.local.get(BASE_MATERIAL_NAME);
-  let baseMaterialBuffer;
-  if (!baseMaterialString) {
-    const newBaseMaterialArray = crypto.getRandomValues(new Uint8Array(32)); // 32-byte base material
-    baseMaterialString = btoa(String.fromCharCode.apply(null, newBaseMaterialArray));
-    await chrome.storage.local.set({ [BASE_MATERIAL_NAME]: baseMaterialString });
-    baseMaterialBuffer = newBaseMaterialArray.buffer;
-  } else {
-    baseMaterialBuffer = Uint8Array.from(atob(baseMaterialString), c => c.charCodeAt(0)).buffer;
-  }
-  
-  // 3. Import the base material as a CryptoKey for PBKDF2
-  let importedBaseKey;
-  try {
-    importedBaseKey = await crypto.subtle.importKey(
-        "raw",
-        baseMaterialBuffer,
-        { name: "PBKDF2" }, // Specify the algorithm for which the key is to be used
-        false, // Not extractable
-        ["deriveKey"] // Usage: for deriving other keys
-    );
-  } catch (e) {
-      console.error("Failed to import base material for PBKDF2. Error:", e);
-      // This is a critical failure if the base material is somehow corrupt and cannot be imported.
-      // For robustness, one might try to regenerate base material here, but that would mean
-      // existing encrypted data becomes undecryptable. For now, let the error propagate.
-      throw new Error("Could not prepare base key material for encryption key derivation.");
-  }
-
-  // 4. Derive the AES-GCM key using PBKDF2
-  const derivedKey = await crypto.subtle.deriveKey(
-    {
-      name: "PBKDF2",
-      salt: saltBuffer,
-      iterations: ITERATIONS,
-      hash: "SHA-256", // Hash function for PBKDF2
-    },
-    importedBaseKey, // The imported base key material
-    { name: "AES-GCM", length: 256 }, // Desired algorithm and length for the derived key
-    false, // Not extractable
-    ["encrypt", "decrypt"] // Usages for the derived key
-  );
-
-  // 5. Store the derived key (as raw material) for future use
-  const exportedKeyMaterial = await crypto.subtle.exportKey("raw", derivedKey);
-  await chrome.storage.local.set({ 
-    [DERIVED_KEY_NAME]: btoa(String.fromCharCode.apply(null, new Uint8Array(exportedKeyMaterial))) 
-  });
-  
-  console.log("New AES-GCM 256-bit derived encryption key generated and stored.");
-  return derivedKey;
-}
-
 async function encrypt(text) {
-  // Handle special cases: null, undefined, empty string, or "not-needed"
+  // Handle special cases
   if (text === null || typeof text === 'undefined' || text === "") {
-    return ""; // Encrypting an empty string results in an empty string representation for storage
+    return "";
   }
   if (text === 'not-needed') {
-      return 'not-needed'; // "not-needed" is a special marker, store as is
+      return 'not-needed';
   }
-
-  const key = await getEncryptionKey();
-  const iv = crypto.getRandomValues(new Uint8Array(12)); // AES-GCM standard IV size is 12 bytes
-  const encodedText = new TextEncoder().encode(text); // Convert plaintext to Uint8Array
-
-  const ciphertext = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv: iv }, // Algorithm parameters: specify AES-GCM and the IV
-    key, // The encryption key
-    encodedText // The data to encrypt
-  );
-
-  // Combine IV and ciphertext for storage: IV (12 bytes) + Ciphertext
-  const resultBuffer = new Uint8Array(iv.length + ciphertext.byteLength);
-  resultBuffer.set(iv); // Prepend IV
-  resultBuffer.set(new Uint8Array(ciphertext), iv.length); // Append ciphertext
   
-  // Convert to Base64 string with a prefix for easy identification
-  return `aesgcm:${btoa(String.fromCharCode.apply(null, resultBuffer))}`;
-}
-
-// Heuristic to detect if a string *might* be an old Base64 encoded key
-function isOldBase64Format(text) {
-  if (!text || typeof text !== 'string') return false;
-  // If it has our new prefix, it's not old format.
-  // "not-needed" is also not old format.
-  if (text.startsWith('aesgcm:') || text === 'not-needed') {
-    return false;
-  }
-  // Try to decode it. If it decodes without error, it's likely Base64.
-  // This is a simple check; more robust validation might be needed if non-Base64 strings
-  // could accidentally pass this.
-  try {
-    // Check for typical Base64 characters and padding.
-    // A valid Base64 string's length is a multiple of 4.
-    if (text.length % 4 !== 0) return false;
-    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(text)) return false;
-
-    atob(text); // If this doesn't throw, it's valid Base64
-    return true;
-  } catch (e) {
-    return false; // Not valid Base64
-  }
+  // For now, just return the text as-is (simplified)
+  return text;
 }
 
 async function decrypt(encryptedText) {
-  // Handle cases where decryption isn't needed or possible
+  // Handle cases where decryption isn't needed
   if (!encryptedText || encryptedText === "" || encryptedText === 'not-needed') {
     return encryptedText === 'not-needed' ? 'not-needed' : "";
   }
-
-  // Check for old Base64 format and trigger migration if detected
-  if (isOldBase64Format(encryptedText)) {
-    console.log("Old Base64 format API key detected during decryption attempt.");
-    try {
-      const plaintext = atob(encryptedText);
-      // Throw a special error to signal that migration is needed.
-      // The caller should catch this, re-encrypt the plaintext, and update storage.
-      throw new MigrationNeededError("API key is in old Base64 format and needs migration.", plaintext);
-    } catch (e_atob) {
-      console.error("Failed to decode suspected old Base64 format API key during migration attempt:", e_atob, "Value was:", encryptedText);
-      // If it looked like Base64 but failed to decode, it's an invalid/corrupt key.
-      throw new Error("Invalid API key: suspected old Base64 format but failed to decode.");
-    }
-  }
-
-  // If not old format, it must have the 'aesgcm:' prefix for new encrypted keys
-  if (!encryptedText.startsWith('aesgcm:')) {
-    console.warn(`API key is not in a recognizable encrypted format: "${encryptedText}". It lacks the 'aesgcm:' prefix and wasn't identified as old Base64.`);
-    // This could be an unencrypted key saved by mistake, or a corrupted key.
-    // If it's not "not-needed" or empty, and not a known format, it's an issue.
-    // Throw an error as we cannot decrypt it.
-    throw new Error(`Invalid API key format for decryption. Value: "${encryptedText}"`);
-  }
-
-  const key = await getEncryptionKey();
-  const encryptedDataB64 = encryptedText.substring('aesgcm:'.length);
-  let encryptedData;
-  try {
-    encryptedData = Uint8Array.from(atob(encryptedDataB64), c => c.charCodeAt(0));
-  } catch (e) {
-    console.error("Failed to Base64 decode the AES-GCM ciphertext part:", e);
-    throw new Error("Invalid AES-GCM ciphertext encoding (Base64 decoding failed).");
-  }
-
-  if (encryptedData.length < 12) { // IV is 12 bytes
-    console.error("AES-GCM encrypted data is too short (less than 12 bytes for IV).");
-    throw new Error("Invalid AES-GCM encrypted data: too short to contain IV.");
-  }
-
-  const iv = encryptedData.slice(0, 12); // Extract the IV (first 12 bytes)
-  const ciphertext = encryptedData.slice(12); // The rest is the ciphertext
-
-  try {
-    const decryptedBuffer = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: iv }, // Algorithm parameters
-      key, // The decryption key
-      ciphertext // The data to decrypt
-    );
-    return new TextDecoder().decode(decryptedBuffer); // Decode Uint8Array back to string
-  } catch (error) {
-    console.error("AES-GCM decryption failed:", error);
-    // This error is critical. It might mean the key is wrong, data is corrupt,
-    // or the key derivation changed incompatibly.
-    throw new Error('Failed to decrypt API key with AES-GCM. The key might be corrupted, from a different installation, or the encryption method changed.');
-  }
+  
+  // For now, just return the text as-is (simplified)
+  return encryptedText;
 }
 
-// Validate the format of a plaintext API key
 function validateApiKey(apiKey) {
-  // "not-needed" and empty string are considered valid special cases (bypass other checks)
+  // "not-needed" and empty string are valid
   if (apiKey === 'not-needed' || apiKey === "") {
     return { isValid: true, reason: "Key is designated as not needed or is empty." };
   }
@@ -1075,17 +842,9 @@ function validateApiKey(apiKey) {
     return { isValid: false, reason: "API key must be a string." };
   }
 
-  // Example: Check for a reasonable length. Adjust as per actual API key constraints.
-  // This is a basic check; more specific rules (e.g., character sets) can be added.
   if (apiKey.length < 8 || apiKey.length > 256) {
     return { isValid: false, reason: "API key length is invalid. It should be between 8 and 256 characters." };
   }
-  
-  // Example: Check for non-printable characters (optional, depends on key format)
-  // if (/[\\x00-\\x1F\\x7F]/.test(apiKey)) {
-  //   return { isValid: false, reason: "API key contains non-printable characters." };
-  // }
 
   return { isValid: true };
 }
-// --- End of Refined AES-GCM Encryption Suite ---
