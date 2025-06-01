@@ -191,4 +191,4 @@ This extension is designed to comply with:
 - No data collection beyond functional necessity
 
 **Contact for Data Questions:** info@vjranga.com
-**Privacy Policy:** https://github.com/VJ-Ranga/kokoro-ttsv5/blob/main/PRIVACY_POLICY.md
+**Privacy Policy:** https://github.com/VJ-Ranga/Kokoro-TTS-Reader---Chrome-Extension/blob/main/PRIVACY_POLICY.md

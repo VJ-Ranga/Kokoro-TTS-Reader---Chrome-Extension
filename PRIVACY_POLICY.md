@@ -109,7 +109,7 @@ We may update this privacy policy from time to time. When we do:
 
 If you have questions about this privacy policy or the extension's data practices:
 
-- **GitHub Issues**: https://github.com/VJ-Ranga/kokoro-ttsv5/issues
+- **GitHub Issues**: https://github.com/VJ-Ranga/Kokoro-TTS-Reader---Chrome-Extension/issues
 - **Email**: info@vjranga.com
 
 ## Compliance

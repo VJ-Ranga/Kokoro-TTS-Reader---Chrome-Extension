@@ -20,7 +20,7 @@ This is where you use our permission justifications:
 
 **Privacy Policy URL:** 
 ```
-https://github.com/VJ-Ranga/kokoro-ttsv5/blob/main/PRIVACY_POLICY.md
+https://github.com/VJ-Ranga/Kokoro-TTS-Reader---Chrome-Extension/blob/main/PRIVACY_POLICY.md
 ```
 
 **Permission Justifications Section:**
@@ -99,8 +99,8 @@ Enable background audio playback so users can continue browsing while listening 
 
 ## Quick Copy-Paste Summary
 
-**Homepage URL:** `https://github.com/VJ-Ranga/kokoro-ttsv5`
-**Privacy Policy URL:** `https://github.com/VJ-Ranga/kokoro-ttsv5/blob/main/PRIVACY_POLICY.md`
+**Homepage URL:** `https://github.com/VJ-Ranga/Kokoro-TTS-Reader---Chrome-Extension`
+**Privacy Policy URL:** `https://github.com/VJ-Ranga/Kokoro-TTS-Reader---Chrome-Extension/blob/main/PRIVACY_POLICY.md`
 **Main Permission Justification:** (Use the single-use justification from PERMISSION_JUSTIFICATIONS.md)
 
 You're ready to submit! 🚀
